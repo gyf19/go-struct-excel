@@ -2,10 +2,12 @@ package structexcel
 
 import (
 	"fmt"
-	"github.com/xuri/excelize/v2"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/xuri/excelize/v2"
 )
 
 type excelHeaderField struct {
@@ -30,7 +32,19 @@ type excelHeaderNode struct {
 	Children []*excelHeaderNode
 }
 
-func ParseExcelHeaderTag(tag string, col int) *excelHeaderField {
+func IsPtr(sField reflect.Value) bool {
+	k := sField.Kind()
+	switch k {
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.UnsafePointer:
+		return true
+	case reflect.Interface, reflect.Slice:
+		return true
+	}
+	return false
+}
+
+func ParseExcelHeaderTag(sField reflect.StructField, sValue reflect.Value, col int) *excelHeaderField {
+	tag := sField.Tag.Get("excel")
 	h := &excelHeaderField{
 		Col:   col,
 		level: 1,
@@ -42,7 +56,7 @@ func ParseExcelHeaderTag(tag string, col int) *excelHeaderField {
 
 	tagList := strings.Split(tag, ",")
 	for k, v := range tagList {
-		if v == "allowempty" {
+		if v == "allowempty" && IsPtr(sValue) {
 			h.allowEmpty = true
 		}
 
@@ -104,7 +118,6 @@ func ParseExcelHeaderTag(tag string, col int) *excelHeaderField {
 			h.headerName = v
 		}
 	}
-
 	return h
 }
 
@@ -136,10 +149,11 @@ func (x excelHeaderSlice) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
 func (x excelHeaderSlice) getFieldMap() excelHeaderMap {
 	res := make(excelHeaderMap, 0)
 	for _, v := range x {
-		if v.level == 1 {
-			res[v.fieldName] = v
+		field := v
+		if field.level == 1 {
+			res[v.fieldName] = field
 		} else {
-			res[v.headerName] = v
+			res[v.headerName] = field
 		}
 	}
 	return res
@@ -148,7 +162,8 @@ func (x excelHeaderSlice) getFieldMap() excelHeaderMap {
 func (x excelHeaderSlice) getHeaderMap() excelHeaderMap {
 	res := make(excelHeaderMap, 0)
 	for _, v := range x {
-		res[v.headerName] = v
+		field := v
+		res[field.headerName] = field
 	}
 	return res
 }
@@ -156,8 +171,9 @@ func (x excelHeaderSlice) getHeaderMap() excelHeaderMap {
 func (x excelHeaderSlice) getExpandHeaderSlice() excelHeaderSlice {
 	res := make(excelHeaderSlice, 0)
 	for _, v := range x {
-		if v.expand {
-			res = append(res, v)
+		field := v
+		if field.expand {
+			res = append(res, field)
 		}
 	}
 	return res
@@ -166,7 +182,8 @@ func (x excelHeaderSlice) getExpandHeaderSlice() excelHeaderSlice {
 func (x excelHeaderSlice) getColHeaderMap() map[int]*excelHeaderField {
 	res := make(map[int]*excelHeaderField)
 	for _, v := range x {
-		res[v.Col] = v
+		field := v
+		res[field.Col] = field
 	}
 	return res
 }
