@@ -3,14 +3,15 @@ package structexcel
 import (
 	"bytes"
 	"fmt"
-	"github.com/pkg/errors"
-	"github.com/xuri/excelize/v2"
 	"io"
 	"net/http"
 	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/pkg/errors"
+	"github.com/xuri/excelize/v2"
 )
 
 type ExcelRemarks interface {
@@ -37,23 +38,23 @@ func NewExcel(filename string) *Excel {
 	}
 }
 
-func OpenExcel(filename string) (*Excel, error) {
-	f, err := excelize.OpenFile(filename)
+func OpenExcel(filename string, pwd string) (*Excel, error) {
+	f, err := excelize.OpenFile(filename, excelize.Options{Password: pwd})
 	if err != nil {
 		return nil, errors.Wrap(err, "excel")
 	}
 	return &Excel{File: f, activeSheet: -1}, nil
 }
 
-func OpenReader(r io.Reader) (*Excel, error) {
-	f, err := excelize.OpenReader(r)
+func OpenReader(r io.Reader, pwd string) (*Excel, error) {
+	f, err := excelize.OpenReader(r, excelize.Options{Password: pwd})
 	if err != nil {
 		return nil, errors.Wrap(err, "excel")
 	}
 	return &Excel{File: f, activeSheet: -1}, nil
 }
 
-func OpenFromUrl(url string) (*Excel, error) {
+func OpenFromUrl(url string, pwd string) (*Excel, error) {
 	resp, err := http.Get(url)
 	if err != nil {
 		return nil, errors.Wrapf(err, "excel读取(%s)失败了", url)
@@ -62,7 +63,7 @@ func OpenFromUrl(url string) (*Excel, error) {
 	if resp.StatusCode < 200 && resp.StatusCode > 299 {
 		return nil, errors.Errorf("excel读取(%s)失败了", url)
 	}
-	return OpenReader(resp.Body)
+	return OpenReader(resp.Body, pwd)
 }
 
 func (e *Excel) Close() error {
@@ -104,6 +105,7 @@ func (e *Excel) AddSheet(name string) (*Sheet, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if e.activeSheet == -1 {
 		e.File.SetActiveSheet(index)
 		// 移除默认sheet1，好像没办法重命名sheet
@@ -115,7 +117,7 @@ func (e *Excel) AddSheet(name string) (*Sheet, error) {
 		autoCreateHeader: true,
 		row:              0,
 		col:              0,
-		header:           make(excelHeaderSlice, 0),
+		headers:          make(excelHeaderSlice, 0),
 	}, nil
 }
 
@@ -126,6 +128,21 @@ func (e *Excel) OpenSheet(sheetName string) (*Sheet, error) {
 	}
 	if index == -1 {
 		return nil, errors.Errorf("%s sheet缺失", sheetName)
+	}
+	return &Sheet{
+		index:            index,
+		Excel:            e.File,
+		SheetName:        sheetName,
+		autoCreateHeader: false,
+		row:              0,
+		col:              0,
+	}, nil
+}
+
+func (e *Excel) OpenSheetByIndex(index int) (*Sheet, error) {
+	sheetName := e.File.GetSheetName(index)
+	if sheetName == "" {
+		return nil, errors.Errorf("%d index: sheet缺失", index)
 	}
 	return &Sheet{
 		index:            index,
@@ -178,7 +195,7 @@ type Sheet struct {
 	Excel     *excelize.File
 	SheetName string
 
-	header           excelHeaderSlice
+	headers          excelHeaderSlice
 	index            int // sheet index
 	autoCreateHeader bool
 	hasRemarks       bool
@@ -255,7 +272,7 @@ func (s *Sheet) expandHeader(dataValue reflect.Value, index int, col int) int {
 	sort.Strings(keyList)
 	header := getElem(dataValue.Index(0))
 	for _, v := range keyList {
-		s.header = append(s.header, &excelHeaderField{
+		s.headers = append(s.headers, &excelHeaderField{
 			fieldName:   header.Type().Field(index).Name,
 			headerName:  v,
 			Col:         col,
@@ -287,7 +304,7 @@ func (s *Sheet) transferHeaders(data reflect.Value) *Sheet {
 
 	for i := 0; i < typee.NumField(); i++ {
 		fieldType := value.Field(i)
-		header := ParseExcelHeaderTag(typee.Field(i).Tag.Get("excel"), col)
+		header := ParseExcelHeaderTag(typee.Field(i), fieldType, col)
 		if header.IsSkip() {
 			continue
 		}
@@ -307,7 +324,7 @@ func (s *Sheet) transferHeaders(data reflect.Value) *Sheet {
 		} else {
 			col += 1
 		}
-		s.header = append(s.header, header)
+		s.headers = append(s.headers, header)
 	}
 	s.addRow()
 	return s
@@ -336,7 +353,7 @@ func (s *Sheet) AddHeader(data interface{}) error {
 	switch headerValue.Kind() {
 	case reflect.Struct:
 		s.transferHeaders(dataValue)
-		headerList := s.header
+		headerList := s.headers
 		sort.Sort(headerList)
 
 		gatherHeader, ok := headerValue.Interface().(ExcelGatherHeader)
@@ -440,7 +457,7 @@ func (s *Sheet) AddData(data interface{}) error {
 			return errors.Wrap(err, "创建表头失败")
 		}
 	}
-
+	headerNameMap := s.headers.getFieldMap()
 	for k := 0; k < dataValue.Len(); k++ {
 		valueStruct := getElem(dataValue.Index(k))
 		if s.autoCreateHeader && valueStruct.Kind() == reflect.Slice && k == 0 {
@@ -450,10 +467,13 @@ func (s *Sheet) AddData(data interface{}) error {
 		switch valueStruct.Kind() {
 		case reflect.Struct:
 			for i := 0; i < valueStruct.NumField(); i++ {
-				value := getElem(valueStruct.Field(i))
-				headerNameMap := s.header.getFieldMap()
 				header, ok := headerNameMap[valueStruct.Type().Field(i).Name]
 				if !ok || header.IsSkip() {
+					continue
+				}
+
+				value := getElem(valueStruct.Field(i))
+				if !value.IsValid() {
 					continue
 				}
 				if header.allowEmpty && s.fieldIsNil(dataValue, i) {
@@ -489,8 +509,8 @@ func (s *Sheet) AddData(data interface{}) error {
 
 // readHeader 读取表头, 确定表头位置
 func (s *Sheet) readHeader(header []string) {
-	headerMap := s.header.getHeaderMap()
-	expandHeader := s.header.getExpandHeaderSlice()
+	headerMap := s.headers.getHeaderMap()
+	expandHeader := s.headers.getExpandHeaderSlice()
 
 	for col, cell := range header {
 		cell = strings.TrimSpace(cell)
@@ -500,7 +520,7 @@ func (s *Sheet) readHeader(header []string) {
 			for _, v := range expandHeader {
 				if v.expandRegex.MatchString(cell) {
 					v.Col = -1
-					s.header = append(s.header, &excelHeaderField{
+					s.headers = append(s.headers, &excelHeaderField{
 						Col:         col + 1,
 						fieldName:   v.fieldName,
 						headerName:  cell,
@@ -518,7 +538,7 @@ func (s *Sheet) readHeader(header []string) {
 
 func (s *Sheet) ExpandHeaderLen() int {
 	count := 0
-	for _, v := range s.header {
+	for _, v := range s.headers {
 		if v.level == 2 {
 			count += 1
 		}
@@ -633,46 +653,7 @@ func (s *Sheet) cellToValue(field reflect.Type, cell string, axis string) (refle
 	return reflect.Value{}, errors.Errorf("暂不支持的类型: %s，需要添加一下switch case", field.Kind())
 }
 
-func (s *Sheet) readBody(rows [][]string, data reflect.Value) (interface{}, error) {
-	hMap := s.header.getColHeaderMap()
-	res := reflect.MakeSlice(reflect.SliceOf(reflect.New(data.Type()).Type()), 0, len(rows))
-	for rn, row := range rows {
-		itemPtr := reflect.New(data.Type())
-		item := itemPtr.Elem()
-		for col, cell := range row {
-			if h, ok := hMap[col+1]; ok {
-				field := item.FieldByName(h.fieldName)
-				if !field.CanSet() {
-					continue
-				}
-				axis, _ := s.axis(rn+2, col+1)
-
-				switch field.Kind() {
-				case reflect.Map:
-					if value, err := s.cellToValue(field.Type().Elem(), cell, axis); err != nil {
-						return nil, err
-					} else {
-						if field.IsNil() {
-							field.Set(reflect.MakeMap(field.Type()))
-						}
-						field.SetMapIndex(reflect.ValueOf(h.headerName), value)
-					}
-				default:
-					if value, err := s.cellToValue(field.Type(), cell, axis); err != nil {
-						return nil, err
-					} else {
-						field.Set(value)
-					}
-				}
-			}
-		}
-		res = reflect.Append(res, itemPtr)
-	}
-	return res.Interface(), nil
-}
-
-// ReadData 读取表格数据,
-// @return []*struct{}
+// ReadData 使用纯流式处理优化后的方法
 func (s *Sheet) ReadData(data interface{}) (interface{}, error) {
 	dataValue := getElem(reflect.ValueOf(data))
 	dataType := dataValue.Type()
@@ -682,48 +663,121 @@ func (s *Sheet) ReadData(data interface{}) (interface{}, error) {
 
 	s.transferHeaders(dataValue)
 
-	rows, err := s.Excel.GetRows(s.SheetName)
+	// 使用流式读取
+	rows, err := s.Excel.Rows(s.SheetName)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 
-	if len(rows) == 0 {
-		return nil, errors.New("excel没有数据")
-	}
+	// 创建指针切片 []*struct
+	sliceType := reflect.SliceOf(reflect.PointerTo(dataType))
+	res := reflect.MakeSlice(sliceType, 0, 100)
 
-	rows = s.filterEmpty(rows)
-	// 头部备注
-	start := 0
+	// 处理表头和备注
+	rowCount := 0
+	headerProcessed := false
+	remarksSkipped := false
+
+	// 计算需要跳过的行数
+	skipRows := 0
 	if remarker, ok := data.(ExcelRemarks); ok {
 		remarks, _, _ := remarker.Remarks()
-		if len(rows[0]) == 1 {
-			if strings.TrimSpace(rows[0][0]) == strings.TrimSpace(remarks) {
-				start += 1
-			}
+		if len(remarks) > 0 {
+			skipRows++
 		}
 	}
 	if gatherHeader, ok := data.(ExcelGatherHeader); ok {
-		start += gatherHeader.GatherHeaderRows()
+		skipRows += gatherHeader.GatherHeaderRows()
 	}
-	s.readHeader(rows[start])
-	return s.readBody(rows[start+1:], dataValue)
-}
+	for rows.Next() {
+		rowCount++
+		row, err := rows.Columns()
+		if err != nil {
+			return nil, err
+		}
 
-func (s *Sheet) filterEmpty(rows [][]string) [][]string {
-	res := make([][]string, 0)
+		// 跳过空行
+		if s.isEmptyRow(row) {
+			continue
+		}
 
-	for _, row := range rows {
-		isEmpty := true
-		for _, col := range row {
-			if len(strings.TrimSpace(col)) > 0 {
-				isEmpty = false
+		// 处理备注行
+		if !remarksSkipped && skipRows > 0 {
+			if rowCount <= skipRows {
 				continue
 			}
+			remarksSkipped = true
+			continue
 		}
-		if !isEmpty {
-			res = append(res, row)
+
+		// 处理表头行
+		if !headerProcessed {
+			s.readHeader(row)
+			headerProcessed = true
+			continue
+		}
+
+		// 创建新的结构体指针
+		itemPtr := reflect.New(dataType)
+		item := itemPtr.Elem()
+
+		if err := s.processDataRow(row, item, rowCount); err != nil {
+			return nil, err
+		}
+
+		res = reflect.Append(res, itemPtr)
+	}
+
+	if !headerProcessed {
+		return nil, errors.New("excel没有数据")
+	}
+
+	return res.Interface(), nil
+}
+
+// processDataRow 处理单行数据
+func (s *Sheet) processDataRow(row []string, item reflect.Value, rowNum int) error {
+	hMap := s.headers.getColHeaderMap()
+
+	for col, cell := range row {
+		if h, ok := hMap[col+1]; ok {
+			field := item.FieldByName(h.fieldName)
+			if !field.CanSet() {
+				continue
+			}
+
+			axis, _ := s.axis(rowNum+1, col+1)
+
+			switch field.Kind() {
+			case reflect.Map:
+				if value, err := s.cellToValue(field.Type().Elem(), cell, axis); err != nil {
+					return err
+				} else {
+					if field.IsNil() {
+						field.Set(reflect.MakeMap(field.Type()))
+					}
+					field.SetMapIndex(reflect.ValueOf(h.headerName), value)
+				}
+			default:
+				if value, err := s.cellToValue(field.Type(), cell, axis); err != nil {
+					return err
+				} else {
+					field.Set(value)
+				}
+			}
 		}
 	}
 
-	return res
+	return nil
+}
+
+// isEmptyRow 检查行是否为空
+func (s *Sheet) isEmptyRow(row []string) bool {
+	for _, cell := range row {
+		if len(strings.TrimSpace(cell)) > 0 {
+			return false
+		}
+	}
+	return true
 }
