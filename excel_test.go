@@ -95,7 +95,7 @@ func TestParseExcelHeaderTag(t *testing.T) {
 }
 
 func TestReadData(t *testing.T) {
-	excel, err := OpenExcel("helloword.xlsx")
+	excel, err := OpenExcel("helloword.xlsx","")
 	if err != nil {
 		t.Error(err)
 	}
