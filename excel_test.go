@@ -48,7 +48,6 @@ func TestNewExcel(t *testing.T) {
 	age := 28
 	data = append(data, &foo{
 		Name:   "h",
-		Age:    &age,
 		Height: 181,
 		Holiday: map[string]bool{
 			"2022-01-27": false,
@@ -95,9 +94,10 @@ func TestParseExcelHeaderTag(t *testing.T) {
 }
 
 func TestReadData(t *testing.T) {
-	excel, err := OpenExcel("helloword.xlsx","")
+	excel, err := OpenExcel("helloworld.xlsx", "")
 	if err != nil {
 		t.Error(err)
+		return
 	}
 	sheet, err := excel.OpenSheet("hello")
 	if err != nil {
