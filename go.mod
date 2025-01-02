@@ -1,4 +1,4 @@
-module github.com/douyacun/go-struct-excel
+module github.com/gyf19/go-struct-excel
 
 go 1.15
 
