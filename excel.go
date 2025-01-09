@@ -672,7 +672,7 @@ func (s *Sheet) ReadData(data interface{}) (interface{}, error) {
 
 	// 创建指针切片 []*struct
 	sliceType := reflect.SliceOf(reflect.PointerTo(dataType))
-	res := reflect.MakeSlice(sliceType, 0, 100)
+	res := reflect.MakeSlice(sliceType, 0, 1000)
 
 	// 处理表头和备注
 	rowCount := 0
@@ -720,9 +720,8 @@ func (s *Sheet) ReadData(data interface{}) (interface{}, error) {
 
 		// 创建新的结构体指针
 		itemPtr := reflect.New(dataType)
-		item := itemPtr.Elem()
 
-		if err := s.processDataRow(row, item, rowCount); err != nil {
+		if err := s.processDataRow(row, itemPtr, rowCount); err != nil {
 			return nil, err
 		}
 
@@ -737,7 +736,8 @@ func (s *Sheet) ReadData(data interface{}) (interface{}, error) {
 }
 
 // processDataRow 处理单行数据
-func (s *Sheet) processDataRow(row []string, item reflect.Value, rowNum int) error {
+func (s *Sheet) processDataRow(row []string, itemPtr reflect.Value, rowNum int) error {
+	item := itemPtr.Elem()
 	hMap := s.headers.getColHeaderMap()
 
 	for col, cell := range row {
